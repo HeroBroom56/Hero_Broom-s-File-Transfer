@@ -25,6 +25,14 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <shlobj.h>
 #include <shlguid.h>
 #include <objbase.h>
+#include <shellapi.h>
+
+#include <vector>
+
+#include "definition.h"
+#include "global.h"
+#include "file.h"
+#include "basic.h"
 
 
 using std::ifstream;
@@ -36,50 +44,24 @@ using std::ios;
 #define EM_SETCUEBANNER (ECM_FIRST + 1)
 #endif
 
-#define ID_EDIT_IP 101
-#define ID_PRESS_BUTTON 102
-#define ID_IP_FORMAT_ERROR 103
-#define ID_CHOOSE_FILE_BUTTON 104
-#define ID_CHOSEN_FILE 105
-#define ID_EDIT_PENDING_MAXIMUM 106
-#define ID_TOO_BIG 107
-#define ID_FORMAT_ERROR 108
-#define ID_INFO_NAME 109
-#define ID_INFO_SIZE 110
-#define ID_INFO_DATE 111
-#define ID_CONFIRM 112
-#define ID_IP_EMPTY 113
-#define ID_PENDING_EMPTY 114
-#define ID_LOG_DISPLAY 115
-#define ID_TAB_CTRL 116
-#define ID_PORT_HINT 117
-#define ID_PENDING_HINT 118
-#define ID_INFO_HINT 119
-#define ID_UI_BORDERS 120
-#define ID_IP_HINT 121
-#define ID_INPUT_TARGET_IP 122
-#define ID_INVALID_IP 123
-#define ID_COPY_LOG 124
-#define ID_CLEAR_LOG 125
-
-#define ID_EDIT_RECV_PORT 201
-#define ID_BUTTON_BROWSE_DIR 202
-#define ID_STATIC_SAVE_PATH 203
-#define ID_BUTTON_START_RECV 204
-#define ID_BUTTON_STOP_RECV 205
-#define ID_STATIC_PORT_HINT 206
-#define ID_EDIT_SAVE_PATH 207
-#define ID_BUTTON_OPEN_FOLDER 208
-#define ID_STATIC_INVALID_PORT 209
-#define ID_STATIC_EMPTY_PORT 210
-
-#define ID_PROGRESS_BAR 401
-#define ID_STATIC_SPEED 402
+#define RADAR_PORT 11451
+#define SEARCH_MSG "DISCOVER_PORTAL"
+#define REPLY_PREFIX "PORTAL_REPLY:"
 
 WSADATA wsaData;
 char g_szFullFilePath[MAX_PATH];
 char g_szRecvFolderPath[MAX_PATH];
 HBRUSH hWhiteBrush = NULL;
+HFONT hFontBold = NULL;
+
+struct PeerInfo {
+	char name[256];
+	char ip[32];
+	DWORD lastSeen;
+	bool isOnline;
+};
+CRITICAL_SECTION g_PeerLock;
+std::vector<PeerInfo> g_PeerList;
 
 struct TransferData {
 	HWND hwnd;
@@ -91,6 +73,7 @@ struct TransferData {
 struct FileInfo {
 	char fileName[260];
 	long long fileSize;
+	char senderName[256];
 };
 
 struct RecvParam {
@@ -98,12 +81,6 @@ struct RecvParam {
 	int port;
 	char savePath[MAX_PATH];
 };
-
-bool DirectoryExists(const char* path) {
-	DWORD dwAttrib = GetFileAttributes(path);
-
-	return (dwAttrib != INVALID_FILE_ATTRIBUTES && (dwAttrib & FILE_ATTRIBUTE_DIRECTORY));
-}
 
 bool IsValidIP(const char* ipStr) {
 	if (ipStr == NULL || strlen(ipStr) == 0) return false;
@@ -119,11 +96,18 @@ void ShowTabPage(HWND hwnd, int pageIndex) {
 		ID_CHOOSE_FILE_BUTTON, ID_CONFIRM,
 		ID_INFO_HINT, ID_INFO_NAME, ID_INFO_SIZE, ID_INFO_DATE,
 		ID_IP_HINT, ID_INPUT_TARGET_IP,
+		ID_COPY_LOG, ID_CLEAR_LOG,
 	};
 
 	int recvControls[] = {
 		ID_EDIT_RECV_PORT, ID_BUTTON_BROWSE_DIR, ID_STATIC_SAVE_PATH, ID_BUTTON_START_RECV, ID_BUTTON_STOP_RECV, ID_STATIC_PORT_HINT,
 		ID_EDIT_SAVE_PATH, ID_BUTTON_OPEN_FOLDER,
+		ID_COPY_LOG, ID_CLEAR_LOG,
+		ID_STATIC_SENDER_HINT, ID_STATIC_SENDER_NAME, ID_STATIC_SENDER_IP,
+	};
+
+	int radarControls[] = {
+		ID_LISTBOX_LAN_RADAR,
 	};
 
 	int sendErrorControls[] = {
@@ -134,121 +118,45 @@ void ShowTabPage(HWND hwnd, int pageIndex) {
 		ID_STATIC_EMPTY_PORT, ID_STATIC_INVALID_PORT,
 	};
 
-	if (pageIndex == 1) {
-		for (int id : sendErrorControls)
-			ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
-	} else if (pageIndex == 0) {
-		for (int id : recvErrorControls)
-			ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
-	}
+	int settingsControls[] = {
+		ID_LIST_BOX_SETTINGS_OPTION,
+		ID_GROUPBOX_GENERAL,
+		ID_GRUOPBOX_NETWORK,
+		ID_GROUPBOX_ABOUT,
+	};
 
-	for (int id : sendControls)
-		ShowWindow(GetDlgItem(hwnd, id), (pageIndex == 0) ? SW_SHOW : SW_HIDE);
+	int helpHideControls[] = {
+		ID_LOG_DISPLAY, ID_STATIC_SPEED, ID_PROGRESS_BAR,
+	};
 
-	for (int id : recvControls)
-		ShowWindow(GetDlgItem(hwnd, id), (pageIndex == 1) ? SW_SHOW : SW_HIDE);
+	for (int id : sendControls) ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
+	for (int id : recvControls) ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
+	for (int id : radarControls) ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
+	for (int id : sendErrorControls) ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
+	for (int id : recvErrorControls) ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
+	for (int id : settingsControls) ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
 
-	InvalidateRect(hwnd, NULL, TRUE);
-}
-
-BOOL SelectFolderEasy(HWND hwnd, char* outPath) {
-	OPENFILENAME ofn;
-	char szFile[MAX_PATH] = "Select Any File in Target Folder";
-	ZeroMemory(&ofn, sizeof(ofn));
-	ofn.lStructSize = sizeof(ofn);
-	ofn.hwndOwner = hwnd;
-	ofn.lpstrFile = szFile;
-	ofn.nMaxFile = sizeof(szFile);
-	ofn.lpstrTitle = "Select any file in the target folder";
-	ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-
-	if (GetOpenFileName(&ofn)) {
-		strcpy(outPath, szFile);
-		char* lastBackslash = strrchr(outPath, '\\');
-		if (lastBackslash) *lastBackslash = '\0';
-		return TRUE;
-	}
-	return FALSE;
-}
-
-BOOL SelectFolderOld(HWND hwnd, char* outPath) {
-	BROWSEINFO bi = { 0 };
-	bi.hwndOwner = hwnd;
-	bi.lpszTitle = "Select the folder to save received files:";
-	bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-
-	LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
-	if (pidl != NULL) {
-		SHGetPathFromIDList(pidl, outPath);
-		CoTaskMemFree(pidl);
-		return TRUE;
-	}
-	return FALSE;
-}
-
-BOOL SelectFileToBuffer(HWND hwnd, char* szPath, int maxLen) {
-	OPENFILENAME ofn;
-
-	ZeroMemory(szPath, maxLen);
-	ZeroMemory(&ofn, sizeof(ofn));
-
-	ofn.lStructSize = sizeof ofn;
-	ofn.hwndOwner = hwnd;
-	ofn.lpstrFile = szPath;
-	ofn.nMaxFile = maxLen;
-
-	ofn.lpstrFilter = "All Files\0*.*\0";
-	ofn.nFilterIndex = 1;
-	ofn.lpstrFileTitle = NULL;
-	ofn.nMaxFileTitle = 0;
-	ofn.lpstrInitialDir = NULL;
-	ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-
-	return GetOpenFileName(&ofn);
-}
-
-BOOL ExportLogToFile(HWND hwndLog) {
-	int len = GetWindowTextLength(hwndLog);
-	if (len <= 0) {
-		MessageBox(NULL, "No log data to export!", "Tip", MB_OK | MB_ICONINFORMATION);
-		return 0;
-	}
-
-	char* buffer = new char[len + 1];
-	GetWindowText(hwndLog, buffer, len + 1);
-
-
-	OPENFILENAME ofn;
-	ZeroMemory(&ofn, sizeof(ofn));
-
-	SYSTEMTIME st;
-	GetLocalTime(&st);
-	char szFileName[MAX_PATH];
-	sprintf(szFileName, "export%04d%02d%02d%02d%02d%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-
-	ofn.lStructSize = sizeof(ofn);
-	ofn.hwndOwner = GetParent(hwndLog);
-	ofn.lpstrFilter = "Log Files (*.log)\0*.log\0All Files (*.*)\0*.*\0";
-	ofn.lpstrFile = szFileName;
-	ofn.nMaxFile = MAX_PATH;
-	ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-	ofn.lpstrDefExt = "log";
-
-	if (GetSaveFileName(&ofn)) {
-		std::ofstream outFile(ofn.lpstrFile, std::ios::out | std::ios::trunc);
-		if (outFile.is_open()) {
-			outFile << buffer;
-			outFile.close();
-			MessageBox(NULL, "Log exported successfully!", "Success", MB_OK | MB_ICONINFORMATION);
-		} else {
-			MessageBox(NULL, "Unable to create export file!", "Error", MB_OK | MB_ICONERROR);
-		}
-		delete[] buffer;
-		return 1;
+	if (pageIndex == TAB_SETTINGS) {
+		for (int id : helpHideControls) ShowWindow(GetDlgItem(hwnd, id), SW_HIDE);
 	} else {
-		delete[] buffer;
-		return 0;
+		for (int id : helpHideControls) ShowWindow(GetDlgItem(hwnd, id), SW_SHOW);
 	}
+
+	if (pageIndex == TAB_SEND) {
+		for (int id : sendControls)
+			ShowWindow(GetDlgItem(hwnd, id), SW_SHOW);
+	} else if (pageIndex == TAB_RECEIVE) {
+		for (int id : recvControls)
+			ShowWindow(GetDlgItem(hwnd, id), SW_SHOW);
+	} else if (pageIndex == TAB_RADAR) {
+		for (int id : radarControls)
+			ShowWindow(GetDlgItem(hwnd, id), SW_SHOW);
+	} else if (pageIndex == TAB_SETTINGS) {
+		for (int id : settingsControls)
+			ShowWindow(GetDlgItem(hwnd, id), SW_SHOW);
+		ShowSettingsPage(hwnd, 0);
+	}
+	InvalidateRect(hwnd, NULL, TRUE);
 }
 
 void SetFileNameWithEllipsis(HWND hStatic, const char* fileName) {
@@ -276,24 +184,17 @@ void SetFileNameWithEllipsis(HWND hStatic, const char* fileName) {
 	SetWindowText(hStatic, DisplayBuf);
 }
 
-void AddLog(HWND hwnd, const char* text) {
-	HWND hLog = GetDlgItem(hwnd, ID_LOG_DISPLAY);
+void UpdateSenderInfo(HWND hwnd, char* senderName, char* senderIP) {
+	char displayName[64], displayIP[32], logInfo[128];
 
-	SYSTEMTIME st;
-	GetLocalTime(&st);
-	char timeStr[20];
-	sprintf(timeStr, "[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
+	sprintf(displayName, "Name: %s", senderName);
+	sprintf(displayIP, "IP: %s", senderIP);
+	SetWindowText(GetDlgItem(hwnd, ID_STATIC_SENDER_NAME), displayName);
+	SetWindowText(GetDlgItem(hwnd, ID_STATIC_SENDER_IP), displayIP);
 
-	char buffer[512];
-	snprintf(buffer, sizeof(buffer), "%s%s\r\n", timeStr, text);
-
-	int len = GetWindowTextLength(hLog);
-	SendMessage(hLog, EM_SETSEL, len, len);
-	SendMessage(hLog, EM_REPLACESEL, FALSE, (LPARAM)buffer);
-
-	SendMessage(hLog, WM_VSCROLL, SB_BOTTOM, 0);
+	sprintf(logInfo, "[Receive] Sender info obtained!! Name: %s\tIP: %s", senderName, senderIP);
+	AddLog(hwnd, logInfo);
 }
-
 
 bool CreateFolder(HWND hwnd, const char* pathBuf) {
 	int ret = SHCreateDirectoryEx(hwnd, pathBuf, NULL);
@@ -385,7 +286,7 @@ DWORD WINAPI SendThread(LPVOID lpParam) {
 	char buffer[16384];
 	char logBuf[512];
 	int wLen, recvRes;
-	
+
 	// Create Socket
 	clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	sockaddr_in serverAddr;
@@ -393,7 +294,7 @@ DWORD WINAPI SendThread(LPVOID lpParam) {
 	serverAddr.sin_port = htons(atoi(data->port));
 	serverAddr.sin_addr.S_un.S_addr = inet_addr(data->ip);
 
-	AddLog(data->hwnd, "Attempting to connect to remote host...");
+	AddLog(data->hwnd, "[Send] Attempting to connect to remote host...");
 	if (connect(clientSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
 		LogSocketError(data->hwnd, "Connect", WSAGetLastError());
 		if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
@@ -403,7 +304,7 @@ DWORD WINAPI SendThread(LPVOID lpParam) {
 		delete data;
 		return 0;
 	}
-	AddLog(data->hwnd, "Connection established! Initializing transfer...");
+	AddLog(data->hwnd, "[Send] Connection established! Initializing transfer...");
 
 	// Open File
 	wLen = MultiByteToWideChar(CP_ACP, 0, data->filePath, -1, NULL, 0);
@@ -415,7 +316,7 @@ DWORD WINAPI SendThread(LPVOID lpParam) {
 	wPath = NULL;
 
 	if (hFile == INVALID_HANDLE_VALUE) {
-		sprintf(logBuf, "File Open Failed! Error: %lu", GetLastError());
+		sprintf(logBuf, "[Send] File Open Failed! Error: %lu", GetLastError());
 		AddLog(data->hwnd, logBuf);
 		if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
 		if (clientSocket != INVALID_SOCKET) closesocket(clientSocket);
@@ -434,13 +335,33 @@ DWORD WINAPI SendThread(LPVOID lpParam) {
 	pName = pName ? pName + 1 : data->filePath;
 	strncpy(info.fileName, pName, 259);
 	info.fileSize = fileSize;
+	strcpy(info.senderName, g_Settings.nickname);
+//	DWORD size = sizeof(info.senderName);
+//	GetComputerName(info.senderName, &size);
 
 	send(clientSocket, (char*)&info, sizeof(info), 0);
+	AddLog(data->hwnd, "[Send] Waiting for recipient to confirm...");
+
+	char accpeted[16];
+	recv(clientSocket, accpeted, sizeof(accpeted), 0);
+
+	if (strcmp(accpeted, "Rejected") == 0) {
+		MessageBox(data->hwnd, "Sender rejected.", "Transfer interrupted", MB_OK | MB_ICONINFORMATION);
+		AddLog(data->hwnd, "[Send] Send request was rejected.");
+		if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+		if (clientSocket != INVALID_SOCKET) closesocket(clientSocket);
+		SetWindowText(GetDlgItem(data->hwnd, ID_CONFIRM), "Confirm and Transfer");
+		EnableWindow(GetDlgItem(data->hwnd, ID_CONFIRM), TRUE);
+		delete data;
+		return 0;
+	}
+
+	AddLog(data->hwnd, "[Send] Recipient accepted!! Start to transfer...");
 
 	// Get the progress
 	recvRes = recv(clientSocket, (char*)&remoteOffset, sizeof(remoteOffset), 0);
 	if (recvRes > 0 && remoteOffset > 0) {
-		sprintf(logBuf, "Resume point found: %I64d MB", remoteOffset / 1024 / 1024);
+		sprintf(logBuf, "[Send] Resume point found: %I64d MB", remoteOffset / 1024 / 1024);
 		AddLog(data->hwnd, logBuf);
 
 		liMove.QuadPart = remoteOffset;
@@ -456,7 +377,6 @@ DWORD WINAPI SendThread(LPVOID lpParam) {
 		int sent = send(clientSocket, buffer, bytesRead, 0);
 		if (sent == SOCKET_ERROR) break;
 		totalSent += sent;
-		while (GetTickCount() - lastUpdateTime <= 200);
 		// Update UI every 500ms
 		DWORD currentTime = GetTickCount();
 		if (currentTime - lastUpdateTime > 500) {
@@ -482,17 +402,16 @@ DWORD WINAPI SendThread(LPVOID lpParam) {
 
 			SetWindowText(hSpeedStatus, finalBuf);
 
-			// 重置记录点
 			lastUpdateTime = currentTime;
 			lastSent = totalSent;
 		}
 	}
 
 	if (totalSent >= fileSize) {
-		AddLog(data->hwnd, "Transfer completed successfully!");
+		AddLog(data->hwnd, "[Send] Transfer completed successfully!");
 		SendMessage(GetDlgItem(data->hwnd, ID_PROGRESS_BAR), PBM_SETPOS, 100, 0);
 		SetWindowText(GetDlgItem(data->hwnd, ID_STATIC_SPEED), "Completed!");
-	} else AddLog(data->hwnd, "TTransfer aborted or connection lost!");
+	} else AddLog(data->hwnd, "[Send] Transfer aborted or connection lost!");
 
 	if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
 	if (clientSocket != INVALID_SOCKET) closesocket(clientSocket);
@@ -515,23 +434,41 @@ DWORD WINAPI RecvThread(LPVOID lpParam) {
 
 	if (bind(listenSocket, (SOCKADDR*)&service, sizeof(service)) == SOCKET_ERROR ||
 	        listen(listenSocket, 5) == SOCKET_ERROR) {
-		AddLog(hwnd, "Bind/Listen failed!");
+		AddLog(hwnd, "[Receive] Bind/Listen failed!");
 		closesocket(listenSocket);
 		goto thread_end;
 	}
 	{
-		AddLog(hwnd, "Server started, waiting for connection...");
+		AddLog(hwnd, "[Receive] Server started, waiting for connection...");
 
 		sockaddr_in clientAddr;
 		int clientAddrLen = sizeof(clientAddr);
 		SOCKET acceptSocket = accept(listenSocket, (SOCKADDR*)&clientAddr, &clientAddrLen);
 
 		if (acceptSocket != INVALID_SOCKET) {
-			AddLog(hwnd, "Connected by client.");
+			AddLog(hwnd, "[Receive] Connected by client.");
 
 			// File Information
 			FileInfo info;
 			if (recv(acceptSocket, (char*)&info, sizeof(info), 0) > 0) {
+
+				char* ipStr = inet_ntoa(clientAddr.sin_addr);
+				char* nameStr = info.senderName;
+				UpdateSenderInfo(hwnd, nameStr, ipStr);
+
+				char returnMessage[16], msgBox[128];
+				sprintf(msgBox, "%s wants to send you a file. Do you want to accept it?\n\nSender's IP: %s", nameStr, ipStr);
+				if (MessageBox(hwnd, msgBox, "Send Request", MB_YESNO | MB_ICONINFORMATION) == IDYES) strcpy(returnMessage, "Accepted");
+				else {
+					AddLog(hwnd, "[Receive] Rejected request!!");
+					strcpy(returnMessage, "Rejected");
+					send(acceptSocket, returnMessage, sizeof(returnMessage), 0);
+					closesocket(listenSocket);
+					closesocket(acceptSocket);
+					goto thread_end;
+				}
+				AddLog(hwnd, "[Receive] Accepted request!!");
+				send(acceptSocket, returnMessage, sizeof(returnMessage), 0);
 
 				wchar_t wFinalPath[MAX_PATH];
 				char finalPath[MAX_PATH];
@@ -556,7 +493,7 @@ DWORD WINAPI RecvThread(LPVOID lpParam) {
 				HANDLE hFile = CreateFileW(wFinalPath, FILE_APPEND_DATA, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 
 				if (hFile != INVALID_HANDLE_VALUE) {
-					sprintf(logBuf, "Resuming: %s from %lld bytes", info.fileName, localSize);
+					sprintf(logBuf, "[Receive] Resuming: %s from %lld bytes", info.fileName, localSize);
 					AddLog(hwnd, logBuf);
 
 					char buffer[16384];
@@ -607,9 +544,12 @@ DWORD WINAPI RecvThread(LPVOID lpParam) {
 					CloseHandle(hFile);
 					SendMessage(GetDlgItem(hwnd, ID_PROGRESS_BAR), PBM_SETPOS, 100, 0);
 					SetWindowText(GetDlgItem(hwnd, ID_STATIC_SPEED), "Completed!");
-					AddLog(hwnd, totalReceived >= info.fileSize ? "Mission Accomplished!! Check your folder now!" : "Oh no!! Transfer aborted or connection lost!");
+					AddLog(hwnd, totalReceived >= info.fileSize ? "[Receive] Mission Accomplished!! Check your folder now!" : "[Receive] Oh no!! Transfer aborted or connection lost!");
+
+//					ShowNotification(NULL, "Transfer Mission Accomplished!!", "Hero Broom's File Transfer", NIIF_INFO, 5000);
+					CreateNotificationThread("Transfer Mission Accomplished!!", "Hero Broom's File Transfer");
 				} else {
-					AddLog(hwnd, "Error: Cannot open file for writing.");
+					AddLog(hwnd, "[Receive] Error: Cannot open file for writing.");
 				}
 			}
 		}
@@ -629,6 +569,313 @@ bool validPortNumber, validPendingNumber, validIP;
 bool recvValidPortNumber;
 char chosenFileName[256];
 
+LRESULT CALLBACK HeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+	if (uMsg == WM_SETCURSOR) {
+		SetCursor(LoadCursor(NULL, IDC_ARROW));
+		return TRUE;
+	}
+	return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+DWORD WINAPI RadarSenderThread(LPVOID lpParam) {
+	HWND hwnd = (HWND)lpParam;
+//	AddLog(hwnd, (char*)"[Radar] RadarSenderThread running!!!");
+	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+	BOOL bOpt = TRUE;
+	setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (char*)&bOpt, sizeof(bOpt));
+
+	sockaddr_in addr;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(RADAR_PORT);
+	addr.sin_addr.s_addr = INADDR_BROADCAST;
+
+	while (true) {
+		addr.sin_addr.s_addr = INADDR_BROADCAST;
+		sendto(sock, SEARCH_MSG, strlen(SEARCH_MSG), 0, (sockaddr*)&addr, sizeof(addr));
+
+		EnterCriticalSection(&g_PeerLock);
+
+		DWORD now = GetTickCount();
+		for (size_t i = 0; i < g_PeerList.size(); i++) {
+//			char log[128];
+//			sprintf(log, "[Radar] Last seen %s in %d. (Currently %d, isOnline = %d)", g_PeerList[i].name, (int)g_PeerList[i].lastSeen, (int)now, (int)g_PeerList[i].isOnline);
+//			AddLog(hwnd, log);
+
+			if (g_PeerList[i].isOnline && (now - g_PeerList[i].lastSeen > 6000)) {
+				g_PeerList[i].isOnline = 0;
+//				AddLog(hwnd, "[Radar] Offline information posted!!");
+				PostMessage(hwnd, WM_UPDATE_RADAR_STATUS, i, 0);
+			}
+//			else if (!g_PeerList[i].isOnline && (now - g_PeerList[i].lastSeen <= 6000)) {
+//				g_PeerList[i].isOnline = 1;
+////				AddLog(hwnd, "[Radar] Online information posted!!");
+//				PostMessage(hwnd, WM_UPDATE_RADAR_STATUS, i, 1);
+//			}
+
+		}
+
+		LeaveCriticalSection(&g_PeerLock);
+
+//		AddLog(hwnd, (char*)"[Sender] Broadcast and Local signals sent!");
+		Sleep(2000);
+	}
+	closesocket(sock);
+	return 0;
+}
+
+DWORD WINAPI RadarReceiverThread(LPVOID lpParam) {
+	HWND hwnd = (HWND)lpParam;
+
+	Sleep(200);
+
+	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock == INVALID_SOCKET) {
+		AddLog(hwnd, (char*)"[Radar] Socket creation failed!");
+		return 0;
+	}
+
+	int opt = 1;
+	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+	setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (const char*)&opt, sizeof(opt));
+
+	sockaddr_in localAddr;
+	memset(&localAddr, 0, sizeof(localAddr));
+	localAddr.sin_family = AF_INET;
+	localAddr.sin_port = htons((unsigned short)RADAR_PORT);
+	localAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+//	localAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+	if (bind(sock, (sockaddr*)&localAddr, sizeof(localAddr)) == SOCKET_ERROR) {
+		int err = WSAGetLastError();
+		char errorMsg[100];
+		sprintf(errorMsg, "[Radar] Bind failed! Error code: %d", err);
+		AddLog(hwnd, errorMsg);
+		closesocket(sock);
+		return 0;
+	}
+
+//	char errorMsg[100];
+//	sprintf(errorMsg, "[Radar] Bind Return code: %d", WSAGetLastError());
+//	AddLog(hwnd, errorMsg);
+//	AddLog(hwnd, (char*)"[Radar] System online, listening...");
+
+	char buf[1024];
+	sockaddr_in remoteAddr;
+	int addrLen = sizeof(remoteAddr);
+
+	while (true) {
+		int len = recvfrom(sock, buf, sizeof(buf) - 1, 0, (sockaddr*)&remoteAddr, &addrLen);
+		if (len > 0) {
+			buf[len] = '\0';
+			char* senderIP = inet_ntoa(remoteAddr.sin_addr);
+			char myHostName[256];
+			strcpy(myHostName, g_Settings.nickname);
+//			gethostname(myHostName, 256);
+//			char logMsg[1024];
+//			sprintf(logMsg, "[Raw Message] Received message from %s : %s", senderIP, buf);
+//			AddLog(hwnd, logMsg);
+
+			if (strcmp(buf, SEARCH_MSG) == 0) {
+				char reply[512];
+				sprintf(reply, "%s%s", REPLY_PREFIX, myHostName);
+
+				sockaddr_in broadcastAddr;
+				memset(&broadcastAddr, 0, sizeof(broadcastAddr));
+				broadcastAddr.sin_family = AF_INET;
+				broadcastAddr.sin_port = htons((unsigned short)RADAR_PORT);
+				broadcastAddr.sin_addr.s_addr = INADDR_BROADCAST; // 全局广播
+
+				sendto(sock, reply, (int)strlen(reply), 0, (sockaddr*)&broadcastAddr, sizeof(broadcastAddr));
+//				AddLog(hwnd, (char*)"[Reply] Broadcasted my presence to the network!");
+			}
+
+			else if (strncmp(buf, REPLY_PREFIX, strlen(REPLY_PREFIX)) == 0) {
+				char* peerName = buf + strlen(REPLY_PREFIX);
+
+				if (strcmp(peerName, myHostName) != 0) {
+//					AddLog(hwnd, (char*)"[!!!] SUCCESS! Found a reply. Updating table...");
+
+					PeerInfo* info = new PeerInfo;
+					strncpy(info->name, peerName, 63);
+					strncpy(info->ip, senderIP, 31);
+
+					bool found = 0;
+					EnterCriticalSection(&g_PeerLock);
+					for (size_t i = 0; i < g_PeerList.size(); i++) {
+						if (strcmp(g_PeerList[i].ip, senderIP) == 0) {
+							g_PeerList[i].lastSeen = GetTickCount();
+							if (g_PeerList[i].isOnline == 0) {
+//								AddLog(hwnd, "[Radar] Online information posted!!");
+								char log[128];
+								sprintf(log, "[Friends] Heads up! %s just joined the network!!", g_PeerList[i].name);
+								AddLog(hwnd, log);
+
+							}
+							g_PeerList[i].isOnline = 1;
+							PostMessage(hwnd, WM_UPDATE_RADAR_STATUS, i, 1);
+							found = 1;
+						}
+					}
+
+					if (!found) {
+//						char log[128];
+//						sprintf(log, "[Radar] New peer information obtained: %s from %s!!", peerName, senderIP);
+//						AddLog(hwnd, log);
+
+						PeerInfo newRecord;
+						strncpy(newRecord.name, peerName, 63);
+						strncpy(newRecord.ip, senderIP, 31);
+						newRecord.lastSeen = GetTickCount();
+						newRecord.isOnline = 1;
+
+//						AddLog(hwnd, "[Radar] Online information posted!!");
+						char log[128];
+						sprintf(log, "[Friends] Heads up! %s just joined the network!!", newRecord.name);
+						AddLog(hwnd, log);
+						g_PeerList.push_back(newRecord);
+
+						PostMessage(hwnd, WM_UPDATE_RADAR, (WPARAM)info, 0);
+					}
+
+					LeaveCriticalSection(&g_PeerLock);
+					
+					delete info;
+				}
+			}
+		}
+	}
+
+	closesocket(sock);
+	return 0;
+}
+
+void ShowContextMenu(HWND hwnd, int itemIndex) {
+	HMENU hMenu = CreatePopupMenu();
+	AppendMenu(hMenu, MF_STRING, 1001, "Copy IP Adress");
+	AppendMenu(hMenu, MF_STRING, 1002, "Send to this Computer");
+
+	SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)itemIndex);
+
+	POINT pt;
+	GetCursorPos(&pt);
+
+	TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_TOPALIGN, pt.x, pt.y, 0, hwnd, NULL);
+	DestroyMenu(hMenu);
+}
+
+void GetLocalIPInfo(char* outName, char* outIP) {
+	strcpy(outName, "Unknown-PC");
+	strcpy(outIP, "0.0.0.0");
+
+	char szHostName[256];
+	if (gethostname(szHostName, sizeof(szHostName)) == 0) {
+		strcpy(outName, szHostName);
+		hostent* pHost = gethostbyname(szHostName);
+		if (pHost != NULL) {
+			for (int i = 0; pHost->h_addr_list[i] != NULL; i++) {
+				IN_ADDR addr;
+				memcpy(&addr, pHost->h_addr_list[i], sizeof(IN_ADDR));
+				char* pszIP = inet_ntoa(addr);
+
+				if (strcmp(pszIP, "127.0.0.1") != 0) {
+					strcpy(outIP, pszIP);
+					break;
+				}
+			}
+		}
+	}
+}
+
+void InsertRadarListbox(HWND hListBox, int lineNum, char* cpName, char* cpIP, char* cpStatus) {
+	LVITEM lvi = { 0 };
+	lvi.mask = LVIF_TEXT;
+	lvi.iItem = lineNum;
+	lvi.iSubItem = 0;
+	lvi.pszText = (char*)"";
+	ListView_InsertItem(hListBox, &lvi);
+
+	ListView_SetItemText(hListBox, lineNum, 1, cpName);
+	ListView_SetItemText(hListBox, lineNum, 2, cpIP);
+	ListView_SetItemText(hListBox, lineNum, 3, cpStatus);
+}
+
+void GetConfigPath(char* szPath) {
+	char appDataPath[MAX_PATH];
+
+	if (SHGetSpecialFolderPathA(NULL, appDataPath, CSIDL_LOCAL_APPDATA, TRUE)) {
+		sprintf(szPath, "%s\\HBTF", appDataPath);
+		CreateDirectoryA(szPath, NULL);
+		strcat(szPath, "\\config.ini");
+	}
+}
+
+void UpdateGlobalSettings(SettingOptions& Settings) {
+	char szIniPath[MAX_PATH];
+	GetConfigPath(szIniPath);
+
+	WritePrivateProfileString("Status", "FirstRun", Settings.firstStart, szIniPath);
+
+	WritePrivateProfileString("Local PC", "UserName", Settings.nickname, szIniPath);
+	WritePrivateProfileString("Local PC", "LocalIP", Settings.localIP, szIniPath);
+
+	WritePrivateProfileString("General", "DefaultSavePath", Settings.savePath, szIniPath);
+	WritePrivateProfileString("General", "AutoStart", (Settings.autoStart ? "1" : "0"), szIniPath);
+	WritePrivateProfileString("General", "ShowNotification", (Settings.showNotification ? "1" : "0"), szIniPath);
+
+}
+
+void GetGlobalSettings(SettingOptions& Settings) {
+	char szIniPath[MAX_PATH];
+	GetConfigPath(szIniPath);
+
+
+	char firstRun[10] = {0};
+	char localName[128], localIP[32];
+	GetLocalIPInfo(localName, localIP);
+	char downloadPath[MAX_PATH];
+//	SHGetFolderPath(FOLDERID_Downloads, 0, NULL, &downloadPath);
+	SHGetFolderPath(NULL, CSIDL_PROFILE | CSIDL_FLAG_CREATE, NULL, 0, downloadPath);
+	strcat(downloadPath, "\\Downloads");
+
+	strcpy(firstRun, Settings.firstStart);
+	GetPrivateProfileString("Status", "FirstRun", "Yes", firstRun, 10, szIniPath);
+	strcpy(Settings.firstStart, firstRun);
+
+	GetPrivateProfileString("Local PC", "UserName", localName, Settings.nickname, 128, szIniPath);
+	GetPrivateProfileString("Local PC", "LocalIP", localIP, Settings.localIP, 32, szIniPath);
+
+	GetPrivateProfileString("General", "DefaultSavePath", downloadPath, Settings.savePath, MAX_PATH, szIniPath);
+	Settings.autoStart = GetPrivateProfileInt("General", "AutoStart", 0, szIniPath);
+	Settings.showNotification = GetPrivateProfileInt("General", "ShowNotification", 0, szIniPath);
+
+	strcpy(g_szRecvFolderPath, Settings.savePath);
+
+	if (strcmp(firstRun, "Yes") == 0) {
+		// Welcome
+		const char* guideText =
+		    "Hey! Welcome to Hero_Broom's File Transfer!!\n"
+		    "------------------------------------------\n"
+		    "1. [Quick Start]\n"
+		    "   - Sending: Select File -> Enter Target IP -> GO!!\n"
+		    "   - Receiving: Set Port -> Select Path -> Click Listen!!\n\n"
+		    "2. [The 'Secret' of IP]\n"
+		    "   - [IMPORTANT!!!] Make sure you and your friend are in the SAME LAN!!\n"
+		    "   - Use 'ipconfig' in CMD to find your IP if you're lost!!\n\n"
+		    "3. [Breakpoint Resume]\n"
+		    "   - Connection lost? NO PROBLEM!! Just start again,\n"
+		    "     it will resume from where it stopped!!\n\n"
+		    "4. [Pro Tip]\n"
+		    "   - If it's stuck, check your Firewall settings!!\n"
+		    "   - Don't leave the Port field empty or it will CRY!!\n\n"
+		    "Have fun transferring big files!! (Support me on GitHub!!)";
+
+		MessageBox(NULL, guideText, "First Run Guide", MB_OK | MB_ICONINFORMATION);
+
+		WritePrivateProfileString("Status", "FirstRun", "No", szIniPath);
+	}
+}
+
 /* This is where all the input to the window goes to */
 LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) {
 	switch (Message) {
@@ -646,11 +893,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 			break;
 		}
 
+		case WM_INITDIALOG: {
+			LOGFONT lf;
+			GetObject(GetStockObject(DEFAULT_GUI_FONT), sizeof(LOGFONT), &lf);
+			lf.lfWeight = FW_BOLD;
+			hFontBold = CreateFontIndirect(&lf);
+		}
+
 		case WM_CTLCOLORSTATIC: {
 			HDC hdcStatic = (HDC)wParam;
 			HWND hStaticWnd = (HWND)lParam;
 
-			if (GetDlgCtrlID(hStaticWnd) == ID_STATIC_SPEED) {
+			if (GetDlgCtrlID(hStaticWnd) == ID_STATIC_SPEED || GetDlgCtrlID(hStaticWnd) == ID_STATIC_SENDER_IP || GetDlgCtrlID(hStaticWnd) == ID_STATIC_SENDER_NAME) {
 				SetBkMode(hdcStatic, TRANSPARENT);
 				SetTextColor(hdcStatic, RGB(0, 0, 0));
 				return (LRESULT)hWhiteBrush;
@@ -693,6 +947,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 
 		case WM_CREATE: {
 
+			//Init Drag and Drop
+			DragAcceptFiles(hwnd, TRUE);
+
 			hWhiteBrush = CreateSolidBrush(RGB(255, 255, 255));
 
 			//Create Fonts
@@ -709,6 +966,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 			                              DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
 			                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
 			                              VARIABLE_PITCH, TEXT("Comic Sans MS"));
+			HFONT hMiddleFont = CreateFont(20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+			                               DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+			                               CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+			                               VARIABLE_PITCH, TEXT("Comic Sans MS"));
+			HFONT hTinyFont = CreateFont(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+			                             DEFAULT_CHARSET, OUT_OUTLINE_PRECIS,
+			                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+			                             VARIABLE_PITCH, TEXT("Comic Sans MS"));
 
 			HWND hTab = CreateWindow(WC_TABCONTROL, "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 10, 80, 615, 360, hwnd, (HMENU)ID_TAB_CTRL, NULL, NULL);
 			SendMessage(hTab, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
@@ -716,9 +981,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 			TCITEM tie;
 			tie.mask = TCIF_TEXT;
 			tie.pszText = "Send File";
-			TabCtrl_InsertItem(hTab, 0, &tie);
+			TabCtrl_InsertItem(hTab, TAB_SEND, &tie);
 			tie.pszText = "Receive File";
-			TabCtrl_InsertItem(hTab, 1, &tie);
+			TabCtrl_InsertItem(hTab, TAB_RECEIVE, &tie);
+			tie.pszText = "LAN Radar";
+			TabCtrl_InsertItem(hTab, TAB_RADAR, &tie);
+			tie.pszText = "Settings && Help";
+			TabCtrl_InsertItem(hTab, TAB_SETTINGS, &tie);
 
 			HWND hBorders = CreateWindow("STATIC", "", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 0, 0, 640, 480, hwnd, (HMENU)ID_UI_BORDERS, NULL, NULL);
 			SetWindowPos(hBorders, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
@@ -802,11 +1071,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 			HWND hPortErrorTip = CreateWindow("STATIC", "Invalid port (Range: 1000-9999)", WS_CHILD | SS_LEFT, 285, 142, 300, 20, hwnd, (HMENU)ID_STATIC_INVALID_PORT, NULL, NULL);
 			SendMessage(hPortErrorTip, WM_SETFONT, (WPARAM)hSystemDefaultFont, MAKELPARAM(TRUE, 0));
 
-			//Browse Direction Button
+			//Browse Directory Button
 
 			HWND hBrowseDir = CreateWindow("BUTTON", "Browse...", WS_VISIBLE | WS_CHILD | SS_LEFT | BS_OWNERDRAW, 22, 167, 146, 26, hwnd, (HMENU)ID_BUTTON_BROWSE_DIR, NULL, NULL);
 			SendMessage(hBrowseDir, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
-			HWND hSavePath = CreateWindow("EDIT", "", WS_VISIBLE | WS_CHILD | SS_LEFT | ES_AUTOHSCROLL, 182, 167, 416, 24, hwnd, (HMENU)ID_EDIT_SAVE_PATH, NULL, NULL);
+			HWND hSavePath = CreateWindow("EDIT", g_Settings.savePath, WS_VISIBLE | WS_CHILD | SS_LEFT | ES_AUTOHSCROLL, 182, 167, 416, 24, hwnd, (HMENU)ID_EDIT_SAVE_PATH, NULL, NULL);
 			SendMessage(hSavePath, WM_SETFONT, (WPARAM)hDefaultFont, MAKELPARAM(TRUE, 0));
 			SendMessage(hSavePath, EM_SETCUEBANNER, (WPARAM)TRUE, (LPARAM)L"Enter or select save directory");
 
@@ -852,9 +1121,176 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 			HWND hSpeedShow = CreateWindow("STATIC", "--- KB/s", WS_VISIBLE | WS_CHILD | SS_CENTER, 355, 410, 100, 20, hwnd, (HMENU)ID_STATIC_SPEED, NULL, NULL);
 			SendMessage(hSpeedShow, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
 
+			//LAN Radar Function
+//			HWND hRadarList = CreateWindowEx(WS_EX_CLIENTEDGE, "LISTBOX", NULL, WS_CHILD | LBS_STANDARD | WS_HSCROLL, 20, 115, 595, 135, hwnd, (HMENU)ID_LISTBOX_LAN_RADAR, GetModuleHandle(NULL), NULL);
 
-			ShowTabPage(hwnd, 0);
+			HWND hRadarList = CreateWindowEx(0, WC_LISTVIEW, "", WS_CHILD | LVS_REPORT | LVS_SINGLESEL | WS_VSCROLL, 20, 115, 595, 135, hwnd, (HMENU)ID_LISTBOX_LAN_RADAR, GetModuleHandle(NULL), NULL);
+			ListView_SetExtendedListViewStyle(hRadarList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+			SendMessage(hRadarList, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
+			LVCOLUMN lvc;
+			lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM | LVCF_FMT;
+			lvc.fmt = LVCFMT_CENTER;
 
+			lvc.iSubItem = 0;
+			lvc.pszText = (char*)"";
+			lvc.cx = 0;
+			ListView_InsertColumn(hRadarList, 0, &lvc);
+			lvc.iSubItem = 1;
+			lvc.pszText = (char*)"Computer Name";
+			lvc.cx = 190;
+			ListView_InsertColumn(hRadarList, 1, &lvc);
+			lvc.iSubItem = 2;
+			lvc.pszText = (char*)"IP Address";
+			lvc.cx = 240;
+			ListView_InsertColumn(hRadarList, 2, &lvc);
+			lvc.iSubItem = 3;
+			lvc.pszText = (char*)"Status";
+			lvc.cx = 160;
+			ListView_InsertColumn(hRadarList, 3, &lvc);
+
+			char localName[256], localIP[32], displayName[256];
+			GetLocalIPInfo(localName, localIP);
+			strcpy(localName, g_Settings.nickname);
+			sprintf(displayName, "%s (Me)", localName);
+			InsertRadarListbox(hRadarList, 0, displayName, localIP, "Active");
+
+//			for (int i = 1; i < 50; i++) {
+//			    LVITEM lvi = { 0 };
+//			    lvi.mask = LVIF_TEXT;
+//			    lvi.iItem = i;
+//			    lvi.iSubItem = 0;
+//			    lvi.pszText = (char*)"";
+//			    ListView_InsertItem(hRadarList, &lvi);
+//
+//			    char nameBuf[32];
+//			    sprintf(nameBuf, "Computer-%02d", i);
+//			    ListView_SetItemText(hRadarList, i, 1, nameBuf);
+//			    ListView_SetItemText(hRadarList, i, 2, (char*)"192.168.1.100");
+//			    ListView_SetItemText(hRadarList, i, 3, (char*)"Active");
+//			}
+
+			HWND hHeader = (HWND)SendMessage(hRadarList, LVM_GETHEADER, 0, 0);
+			SetWindowSubclass(hHeader, HeaderSubclassProc, 0, 0);
+
+			//Show Sender Info
+
+			HWND hSenderHint = CreateWindow("STATIC", "Sender Info:", WS_VISIBLE | WS_CHILD, 485, 275, 115, 20, hwnd, (HMENU)ID_STATIC_SENDER_HINT, NULL, NULL);
+			SendMessage(hSenderHint, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
+
+			HWND hSenderName = CreateWindow("STATIC", "Name: -", WS_VISIBLE | WS_CHILD | SS_LEFT, 485, 305, 115, 40, hwnd, (HMENU)ID_STATIC_SENDER_NAME, NULL, NULL);
+			SendMessage(hSenderName, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
+
+			HWND hSenderIP = CreateWindow("STATIC", "IP Address: -", WS_VISIBLE | WS_CHILD, 485, 335, 115, 20, hwnd, (HMENU)ID_STATIC_SENDER_IP, NULL, NULL);
+			SendMessage(hSenderIP, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
+
+			//Settings Page
+
+			HWND hSettingsOption = CreateWindowExA(0, "LISTBOX", NULL, WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 20, 115, 180, 330, hwnd, (HMENU)ID_LIST_BOX_SETTINGS_OPTION, NULL, NULL);
+			SendMessage(hSettingsOption, WM_SETFONT, (WPARAM)hDefaultFont, MAKELPARAM(TRUE, 0));
+			SendMessage(hSettingsOption, LB_ADDSTRING, 0, (LPARAM)"General");
+			SendMessage(hSettingsOption, LB_ADDSTRING, 0, (LPARAM)"Network Config");
+			SendMessage(hSettingsOption, LB_ADDSTRING, 0, (LPARAM)"About HBTF");
+
+			//General Settings
+
+			hSettingsGeneral = CreateWindowExA(0, "STATIC", "", WS_CHILD | WS_VISIBLE, 210, 110, 401, 331, hwnd, (HMENU)ID_GROUPBOX_GENERAL, NULL, NULL);
+//			HWND hGroupGeneral = CreateWindowExA(0, "BUTTON", "General Settings", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 210, 115, 400, 330, hwnd, (HMENU)ID_GROUPBOX_GENERAL, NULL, NULL);
+//			SendMessage(hGroupGeneral, WM_SETFONT, (WPARAM)hDefaultFont, MAKELPARAM(TRUE, 0));
+
+			HWND hGroupGeneral = CreateWindowExA(0, "BUTTON", "General Settings", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 400, 325, hSettingsGeneral, (HMENU)ID_TITLE_GENERAL, NULL, NULL);
+			SendMessage(hGroupGeneral, WM_SETFONT, (WPARAM)hDefaultFont, MAKELPARAM(TRUE, 0));
+
+			HWND hStaticNick = CreateWindow("STATIC", "Your Nickname (Visible to Others): ", WS_CHILD | WS_VISIBLE | SS_LEFT, 20, 30, 300, 25, hSettingsGeneral, (HMENU)ID_STATIC_NICK, NULL, NULL);
+			SendMessage(hStaticNick, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+			char displayNick[128];
+			strcpy(displayNick, g_Settings.nickname);
+			HWND hEditNick = CreateWindow("EDIT", displayNick, WS_CHILD | WS_VISIBLE | SS_LEFT | ES_AUTOHSCROLL, 22, 57, 340, 24, hSettingsGeneral, (HMENU)ID_EDIT_NICK, NULL, NULL);
+			SendMessage(hEditNick, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+			SendMessage(hEditNick, EM_SETCUEBANNER, (WPARAM)TRUE, (LPARAM)L"Enter your nick name");
+
+			HWND hStaticBrowse = CreateWindow("STATIC", "Default Save Path: ", WS_CHILD | WS_VISIBLE | SS_LEFT, 20, 90, 300, 25, hSettingsGeneral, (HMENU)ID_STATIC_DEFAULT_PATH, NULL, NULL);
+			SendMessage(hStaticBrowse, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+			HWND hEditDefaultPath = CreateWindow("EDIT", g_Settings.savePath, WS_CHILD | WS_VISIBLE | SS_LEFT | ES_AUTOHSCROLL, 22, 117, 240, 24, hSettingsGeneral, (HMENU)ID_EDIT_DEFAULT_PATH, NULL, NULL);
+			SendMessage(hEditDefaultPath, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+			SendMessage(hEditDefaultPath, EM_SETCUEBANNER, (WPARAM)TRUE, (LPARAM)L"Enter default save path");
+			HWND hButtonBrowse = CreateWindow("BUTTON", "Browse...", WS_CHILD | WS_VISIBLE | SS_LEFT | BS_OWNERDRAW, 275, 115, 90, 25, hSettingsGeneral, (HMENU)ID_BUTTON_BROWSE, NULL, NULL);
+			SendMessage(hButtonBrowse, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+
+			HWND hButtonAutoStart = CreateWindow("BUTTON", "", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_OWNERDRAW, 22, 162, 16, 16, hSettingsGeneral, (HMENU)ID_CHECK_AUTO_START, NULL, NULL);
+			SendMessage(hButtonAutoStart, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+			HWND hStaticAutoStart = CreateWindow("STATIC", "Auto Start on Boot", WS_CHILD | WS_VISIBLE | SS_LEFT, 42, 160, 200, 25, hSettingsGeneral, (HMENU)ID_STATIC_AUTO_START, NULL, NULL);
+			SendMessage(hStaticAutoStart, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+
+			HWND hButtonNotification = CreateWindow("BUTTON", "", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_OWNERDRAW, 22, 192, 16, 16, hSettingsGeneral, (HMENU)ID_CHECK_NOTIFICATION, NULL, NULL);
+			SendMessage(hButtonNotification, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+			HWND hStaticNotification = CreateWindow("STATIC", "Enable Notifications (Currently Unavailable)", WS_CHILD | WS_VISIBLE | SS_LEFT, 42, 190, 400, 25, hSettingsGeneral, (HMENU)ID_STATIC_NOTIFICATION, NULL, NULL);
+			SendMessage(hStaticNotification, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+
+
+			HWND hButtonGenSave = CreateWindow("BUTTON", "Save Changes", WS_CHILD | WS_VISIBLE | SS_LEFT | BS_OWNERDRAW, 20, 270, 150, 30, hSettingsGeneral, (HMENU)ID_BUTTON_SAVE_GENERAL, NULL, NULL);
+			SendMessage(hButtonGenSave, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+
+			SetWindowSubclass(hSettingsGeneral, SettingsPageSubclass, 0, 0);
+
+			//Network Settings Page
+
+			hSettingsNetwork = CreateWindowExA(0, "STATIC", "", WS_CHILD | WS_VISIBLE, 210, 110, 401, 331, hwnd, (HMENU)ID_GRUOPBOX_NETWORK, NULL, NULL);
+
+			HWND hGroupNetwork = CreateWindowExA(0, "BUTTON", "Network Settings", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 400, 325, hSettingsNetwork, (HMENU)ID_TITLE_NETWORK, NULL, NULL);
+			SendMessage(hGroupNetwork, WM_SETFONT, (WPARAM)hDefaultFont, MAKELPARAM(TRUE, 0));
+
+			HWND hButtonNetSave = CreateWindow("BUTTON", "Save Changes", WS_CHILD | WS_VISIBLE | SS_LEFT | BS_OWNERDRAW, 20, 270, 150, 30, hSettingsNetwork, (HMENU)ID_BUTTON_SAVE_NETWORK, NULL, NULL);
+			SendMessage(hButtonNetSave, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+
+//			CreateWindow("STATIC", "Debug Text", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 200, 20, hSettingsNetwork, NULL, NULL, NULL);
+
+			char displayedIP[128];
+			sprintf(displayedIP, "Local IP Address: %s", g_Settings.localIP);
+
+			HWND hEditSettingsIP = CreateWindow("STATIC", displayedIP, WS_CHILD | WS_VISIBLE | ES_READONLY | ES_AUTOHSCROLL, 20, 30, 300, 25, hSettingsNetwork, (HMENU)ID_EDIT_READONLY_IP, NULL, NULL);
+			SendMessage(hEditSettingsIP, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+			HWND hButtonCopyIP = CreateWindow("BUTTON", "Copy IP Address", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 255, 28, 140, 25, hSettingsNetwork, (HMENU)ID_BUTTON_COPY_IP, NULL, NULL);
+			SendMessage(hButtonCopyIP, WM_SETFONT, (WPARAM)hMiddleFont, MAKELPARAM(TRUE, 0));
+
+			SetWindowSubclass(hSettingsNetwork, SettingsPageSubclass, 1, 0);
+
+			//About Page
+
+			hSettingsAbout = CreateWindowExA(0, "STATIC", "", WS_CHILD | WS_VISIBLE, 210, 110, 401, 331, hwnd, (HMENU)ID_GROUPBOX_ABOUT, NULL, NULL);
+
+			HWND hGroupAbout = CreateWindowExA(0, "BUTTON", "About HBTF", WS_CHILD | WS_VISIBLE | BS_GROUPBOX, 0, 0, 400, 325, hSettingsAbout, (HMENU)ID_TITLE_NETWORK, NULL, NULL);
+			SendMessage(hGroupAbout, WM_SETFONT, (WPARAM)hDefaultFont, MAKELPARAM(TRUE, 0));
+
+			HWND hLogoStatic = CreateWindowEx(0, "STATIC", NULL, WS_CHILD | WS_VISIBLE | SS_BITMAP, 20, 35, 256, 256, hSettingsAbout, NULL, GetModuleHandle(NULL), NULL);
+//			HBITMAP hBmp = LoadBitmap(GetModuleHandle(NULL), MAKEINTRESOURCE(IDB_ABOUT_LOGO));
+			HBITMAP hBmp = (HBITMAP)LoadImage(GetModuleHandle(NULL), MAKEINTRESOURCE(IDB_ABOUT_LOGO), IMAGE_BITMAP, 128, 128, LR_COPYFROMRESOURCE);
+			if (hBmp != NULL) {
+				SendMessage(hLogoStatic, STM_SETIMAGE, IMAGE_BITMAP, (LPARAM)hBmp);
+			} else {
+				MessageBox(hwnd, "Load Image Failed!!", "Debug", MB_OK);
+			}
+
+			HWND hStaticTitle = CreateWindow("STATIC", "Hero_Broom's File Transfer", WS_CHILD | WS_VISIBLE | SS_LEFT, 150, 30, 300, 40, hSettingsAbout, NULL, NULL, NULL);
+			SendMessage(hStaticTitle, WM_SETFONT, (WPARAM)hDefaultFont, MAKELPARAM(TRUE, 0));
+			HWND hStaticVersion = CreateWindow("STATIC", "Version 1.0.1 (Stable Build)", WS_CHILD | WS_VISIBLE | SS_LEFT, 150, 65, 300, 40, hSettingsAbout, NULL, NULL, NULL);
+			SendMessage(hStaticVersion, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
+			HWND hStaticAuthor = CreateWindow("STATIC", "Developed by Hero_Broom", WS_CHILD | WS_VISIBLE | SS_LEFT, 150, 85, 300, 40, hSettingsAbout, NULL, NULL, NULL);
+			SendMessage(hStaticAuthor, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
+			HWND hStaticCopyright = CreateWindow("STATIC", "Copyright (C) 2026 Hero_Broom", WS_CHILD | WS_VISIBLE | SS_LEFT, 150, 105, 300, 40, hSettingsAbout, NULL, NULL, NULL);
+			SendMessage(hStaticCopyright, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
+			HWND hStaticIntro = CreateWindow("STATIC", "A lightweight, high-speed LAN file transfer tool.", WS_CHILD | WS_VISIBLE | SS_LEFT, 150, 135, 200, 50, hSettingsAbout, NULL, NULL, NULL);
+			SendMessage(hStaticIntro, WM_SETFONT, (WPARAM)hSmallFont, MAKELPARAM(TRUE, 0));
+
+			//Draw Github Link
+			HWND hStaticLink = CreateWindowEx(0, WC_LINK, "<A HREF=\"https://github.com/HeroBroom56/Hero_Broom-s-File-Transfer\">Repository</A> | <A HREF=\"https://github.com/HeroBroom56\">Author</A> | <A HREF=\"https://github.com/HeroBroom56/Hero_Broom-s-File-Transfer/blob/main/LICENSE\">License</A>", WS_VISIBLE | WS_CHILD | SS_RIGHT, 30, 175, 300, 15, hSettingsAbout, NULL, NULL, NULL);
+			SendMessage(hStaticLink, WM_SETFONT, (WPARAM)hTinyFont, MAKELPARAM(TRUE, 0));
+
+			SetWindowSubclass(hSettingsAbout, SettingsPageSubclass, 2, 0);
+
+			CreateThread(NULL, 0, RadarSenderThread, (LPVOID)hwnd, 0, NULL);
+			CreateThread(NULL, 0, RadarReceiverThread, (LPVOID)hwnd, 0, NULL);
+
+			ShowTabPage(hwnd, TAB_SEND);
 			break;
 		}
 
@@ -896,17 +1332,24 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 				SelectObject(hdc, hPen);
 				SelectObject(hdc, GetStockObject(NULL_BRUSH));
 
-				if (curSel == 0) {
+				if (curSel == TAB_SEND) {
+					//Edit Box
 					RoundRect(hdc, 280, 108, 600, 138, 10, 10);
 					RoundRect(hdc, 210, 163, 600, 193, 10, 10);
-				} else {
+				} else if (curSel == TAB_RECEIVE) {
 					RoundRect(hdc, 280, 108, 600, 138, 10, 10);
 					RoundRect(hdc, 180, 165, 600, 193, 10, 10);
+				} else if (curSel == TAB_RADAR) {
+					//Nothing to draw (at least now?)
+				} else if (curSel == TAB_SETTINGS) {
+					RoundRect(hdc, 18, 113, 202, 434, 8, 8);
 				}
 
-				// Log information and File information
-				RoundRect(hdc, 20, 260, 455, 405, 15, 15);
-				RoundRect(hdc, 470, 260, 615, 435, 15, 15);
+				if (curSel != TAB_SETTINGS) {
+					// Log information and File information
+					RoundRect(hdc, 20, 260, 455, 405, 15, 15);
+					RoundRect(hdc, 470, 260, 615, 435, 15, 15);
+				}
 
 				DeleteObject(hPen);
 				return TRUE;
@@ -956,6 +1399,59 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 				int curSel = TabCtrl_GetCurSel(pnmh->hwndFrom);
 				ShowTabPage(hwnd, curSel);
 			}
+
+			if (pnmh->code == HDN_ITEMCHANGINGA || pnmh->code == HDN_ITEMCHANGINGW) {
+				NMHEADER* pHeader = (NMHEADER*)lParam;
+				if (pHeader->pitem->mask & HDI_WIDTH) {
+					SetWindowLongPtr(hwnd, DWLP_MSGRESULT, TRUE);
+					return TRUE;
+				}
+			}
+
+			if (pnmh->idFrom == ID_LISTBOX_LAN_RADAR && pnmh->code == NM_RCLICK) {
+				NMITEMACTIVATE* nmItem = (NMITEMACTIVATE*)lParam;
+				if (nmItem->iItem != -1) {
+					ShowContextMenu(hwnd, nmItem->iItem);
+				}
+			}
+
+			if (pnmh->idFrom == ID_LISTBOX_LAN_RADAR && pnmh->code == NM_DBLCLK) {
+				LPNMITEMACTIVATE pnmItem = (LPNMITEMACTIVATE)lParam;
+				int iItem = pnmItem->iItem;
+				if (iItem != -1) {
+					char szIP[32];
+					ListView_GetItemText(GetDlgItem(hwnd, ID_LISTBOX_LAN_RADAR), iItem, 2, szIP, sizeof(szIP));
+
+					SetWindowText(GetDlgItem(hwnd, ID_INPUT_TARGET_IP), szIP);
+					SendMessage(GetDlgItem(hwnd, ID_TAB_CTRL), TCM_SETCURSEL, TAB_SEND, 0);
+					ShowTabPage(hwnd, TAB_SEND);
+				}
+			}
+
+			if (pnmh->idFrom == ID_LISTBOX_LAN_RADAR && pnmh->code == NM_CUSTOMDRAW) {
+				LPNMLVCUSTOMDRAW lplvcd = (LPNMLVCUSTOMDRAW)lParam;
+
+				switch (lplvcd->nmcd.dwDrawStage) {
+					case CDDS_PREPAINT: {
+						SetWindowLongPtr(hwnd, DWLP_MSGRESULT, (LPARAM)CDRF_NOTIFYITEMDRAW);
+						return TRUE;
+					}
+
+					case CDDS_ITEMPREPAINT: {
+						if (lplvcd->nmcd.dwItemSpec == 0) {
+							SelectObject(lplvcd->nmcd.hdc, hFontBold);
+							lplvcd->clrText = RGB(0, 102, 204);
+							SetWindowLongPtr(hwnd, DWLP_MSGRESULT, (LPARAM)CDRF_NEWFONT);
+							return TRUE;
+						}
+						break;
+					}
+
+					default:
+						break;
+				}
+			}
+
 			break;
 		}
 
@@ -967,6 +1463,39 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 		case WM_COMMAND: {
 
 			switch LOWORD(wParam) {
+
+				case 1001: {
+					HWND hRadarList = GetDlgItem(hwnd, ID_LISTBOX_LAN_RADAR);
+					int nItem = ListView_GetNextItem(hRadarList, -1, LVNI_SELECTED);
+					if (nItem != -1) {
+						char ipText[64];
+						ListView_GetItemText(hRadarList, nItem, 2, ipText, sizeof(ipText));
+
+						if (OpenClipboard(hwnd)) {
+							EmptyClipboard();
+							HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, strlen(ipText) + 1);
+							if (hGlob) {
+								memcpy(GlobalLock(hGlob), ipText, strlen(ipText) + 1);
+								GlobalUnlock(hGlob);
+								SetClipboardData(CF_TEXT, hGlob);
+							}
+							CloseClipboard();
+							AddLog(hwnd, (char*)"[UI] IP Copied to clipboard!!");
+						}
+					}
+				}
+
+				case 1002: {
+					int iItem = (int)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+					char szIP[32];
+					if (iItem != -1) {
+						ListView_GetItemText(GetDlgItem(hwnd, ID_LISTBOX_LAN_RADAR), iItem, 2, szIP, sizeof(szIP));
+
+						SetWindowText(GetDlgItem(hwnd, ID_INPUT_TARGET_IP), szIP);
+						SendMessage(GetDlgItem(hwnd, ID_TAB_CTRL), TCM_SETCURSEL, TAB_SEND, 0);
+						ShowTabPage(hwnd, TAB_SEND);
+					}
+				}
 
 				case ID_INPUT_TARGET_IP: {
 					if (HIWORD(wParam) == EN_CHANGE || HIWORD(wParam) == EN_KILLFOCUS) {
@@ -994,7 +1523,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 						int len = strlen(buffer);
 						HWND hFormatError = GetDlgItem(hwnd, ID_IP_FORMAT_ERROR);
 						HWND hIPEmpty = GetDlgItem(hwnd, ID_IP_EMPTY);
-						if (curSel == 1) {
+						if (curSel == TAB_RECEIVE) {
 							ShowWindow(hFormatError, SW_HIDE);
 							ShowWindow(hIPEmpty, SW_HIDE);
 						}
@@ -1089,7 +1618,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 						g_szFullFilePath[sizeof(g_szFullFilePath) - 1] = '\0';
 
 						char logMsg[MAX_PATH + 20];
-						sprintf(logMsg, "Source file loaded: %s", fileName);
+						sprintf(logMsg, "[UI] Source file loaded: %s", fileName);
 						AddLog(hwnd, logMsg);
 
 						// Obtain Detailed Information
@@ -1117,7 +1646,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 							}
 							SetWindowText(GetDlgItem(hwnd, ID_INFO_SIZE), szSize);
 
-							// --- 处理创建日期 ---
 							SYSTEMTIME st;
 							FileTimeToSystemTime(&fad.ftCreationTime, &st);
 							char szDate[100];
@@ -1160,11 +1688,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 						HANDLE hThread = CreateThread(NULL, 0, SendThread, (LPVOID)data, 0, NULL);
 
 						if (hThread == NULL) {
-							AddLog(hwnd, "Failed to create thread!");
+							AddLog(hwnd, "[Send] Failed to create thread!");
 							delete data;
 						} else {
 							CloseHandle(hThread);
-							AddLog(hwnd, "Transfer thread began in background!");
+							AddLog(hwnd, "[Send] Transfer thread began in background!");
 						}
 					}
 					break;
@@ -1173,7 +1701,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 
 				case ID_COPY_LOG: {
 					if (ExportLogToFile(GetDlgItem(hwnd, ID_LOG_DISPLAY))) {
-						AddLog(hwnd, "Log exported!");
+						AddLog(hwnd, "[UI] Log exported!");
 					}
 					break;
 				}
@@ -1187,21 +1715,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 						g_szRecvFolderPath[MAX_PATH - 1] = '\0';
 
 						char logMsg[MAX_PATH + 50];
-						sprintf(logMsg, "Output path set to: %s", selectedDir);
+						sprintf(logMsg, "[UI] Output path set to: %s", selectedDir);
 						AddLog(hwnd, logMsg);
 					}
 					break;
 				}
 
 				case ID_EDIT_SAVE_PATH: {
-					if (HIWORD(wParam) == EN_CHANGE || HIWORD(wParam) == EN_KILLFOCUS) {
+					if (HIWORD(wParam) == EN_KILLFOCUS) {
 						char buffer[128];
 						GetWindowText((HWND)lParam, buffer, 128);
 						strncpy(g_szRecvFolderPath, buffer, MAX_PATH);
 						g_szRecvFolderPath[MAX_PATH - 1] = '\0';
 
 						char logMsg[MAX_PATH + 50];
-						sprintf(logMsg, "Save directory changed: %s", g_szRecvFolderPath);
+						sprintf(logMsg, "[UI] Save directory changed: %s", g_szRecvFolderPath);
 						AddLog(hwnd, logMsg);
 					}
 					break;
@@ -1278,7 +1806,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 						int len = strlen(buffer);
 						HWND hFormatError = GetDlgItem(hwnd, ID_STATIC_INVALID_PORT);
 						HWND hIPEmpty = GetDlgItem(hwnd, ID_STATIC_EMPTY_PORT);
-						if (curSel == 0) {
+						if (curSel == TAB_SEND) {
 							ShowWindow(hFormatError, SW_HIDE);
 							ShowWindow(hIPEmpty, SW_HIDE);
 						}
@@ -1313,9 +1841,168 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 					break;
 				}
 
+				case ID_LIST_BOX_SETTINGS_OPTION: {
+					if (HIWORD(wParam) == LBN_SELCHANGE) {
+						HWND hListBox = (HWND)lParam;
+						int selIndex = (int)SendMessage(hListBox, LB_GETCURSEL, 0, 0);
+
+						if (selIndex != LB_ERR) {
+							ShowSettingsPage(hwnd, selIndex);
+						}
+					}
+					break;
+				}
+
 				default:
 					break;
 			}
+			break;
+		}
+
+		case WM_DROPFILES: {
+			HDROP hDrop = (HDROP)wParam;
+			char selectedPath[MAX_PATH];
+
+			UINT fileCount = DragQueryFile(hDrop, 0, selectedPath, MAX_PATH);
+			if (fileCount > 0) {
+				SetFileNameWithEllipsis(GetDlgItem(hwnd, ID_INFO_NAME), selectedPath);
+				MessageBox(hwnd, "File loaded via Drag & Drop!!", "Load File", MB_OK | MB_ICONINFORMATION);
+				char* fileName = strrchr(selectedPath, '\\');
+				fileName = (fileName != NULL) ? fileName + 1 : selectedPath;
+				SetFileNameWithEllipsis(GetDlgItem(hwnd, ID_INFO_NAME), fileName);
+
+				strncpy(chosenFileName, fileName, sizeof(chosenFileName) - 1);
+				chosenFileName[sizeof(chosenFileName) - 1] = '\0';
+
+				strncpy(g_szFullFilePath, selectedPath, sizeof(g_szFullFilePath) - 1);
+				g_szFullFilePath[sizeof(g_szFullFilePath) - 1] = '\0';
+
+				char logMsg[MAX_PATH + 20];
+				sprintf(logMsg, "[UI] Source file loaded: %s", fileName);
+				AddLog(hwnd, logMsg);
+
+				// Obtain Detailed Information
+				WIN32_FILE_ATTRIBUTE_DATA fad;
+				if (GetFileAttributesEx(selectedPath, GetFileExInfoStandard, &fad)) {
+
+					char szSize[50];
+					unsigned __int64 fullSize = ((unsigned __int64)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+					double fileSize = (double)fullSize / 1024.0; // Convert into KB
+					if (fileSize >= 1024) {
+						fileSize /= 1024.0;
+						if (fileSize >= 1024) {
+							fileSize /= 1024.0;
+							if (fileSize >= 1024) {
+								fileSize /= 1024.0;
+								sprintf(szSize, "Size: %.2f TB", fileSize);
+							} else {
+								sprintf(szSize, "Size: %.2f GB", fileSize);
+							}
+						} else {
+							sprintf(szSize, "Size: %.2f MB", fileSize);
+						}
+					} else {
+						sprintf(szSize, "Size: %.2f KB", fileSize);
+					}
+					SetWindowText(GetDlgItem(hwnd, ID_INFO_SIZE), szSize);
+
+					SYSTEMTIME st;
+					FileTimeToSystemTime(&fad.ftCreationTime, &st);
+					char szDate[100];
+					sprintf(szDate, "Created:\n%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+					SetWindowText(GetDlgItem(hwnd, ID_INFO_DATE), szDate);
+
+				}
+				InvalidateRect(hwnd, NULL, TRUE);
+			}
+
+			DragFinish(hDrop);
+
+			break;
+		}
+
+		case WM_UPDATE_RADAR: {
+			PeerInfo* info = (PeerInfo*)wParam;
+//			MessageBox(hwnd, "Obtain peer information!!!", "Debug", MB_OK);
+			if (!info) return 0;
+
+			HWND hRadarList = GetDlgItem(hwnd, ID_LISTBOX_LAN_RADAR);
+
+			int rowCount = ListView_GetItemCount(hRadarList);
+			bool isDuplicate = false;
+
+			for (int i = 0; i < rowCount; i++) {
+				char existingIp[32];
+				ListView_GetItemText(hRadarList, i, 2, existingIp, 32);
+				if (strcmp(existingIp, info->ip) == 0) {
+					isDuplicate = true;
+					ListView_SetItemText(hRadarList, i, 3, (char*)"Active");
+					break;
+				}
+			}
+
+			if (!isDuplicate) {
+				LVITEM lvi = { 0 };
+				lvi.mask = LVIF_TEXT;
+				lvi.iItem = rowCount;
+				lvi.iSubItem = 0;
+				lvi.pszText = (char*)"";
+				int newIndex = ListView_InsertItem(hRadarList, &lvi);
+
+				ListView_SetItemText(hRadarList, newIndex, 1, info->name);   // Computer Name
+				ListView_SetItemText(hRadarList, newIndex, 2, info->ip);     // IP Address
+				ListView_SetItemText(hRadarList, newIndex, 3, (char*)"Active"); // Status
+			}
+
+			delete info;
+			return 0;
+		}
+
+		case WM_UPDATE_RADAR_STATUS: {
+			int index = (int)wParam;
+			int isOnline = (int)lParam;
+
+			HWND hList = GetDlgItem(hwnd, ID_LISTBOX_LAN_RADAR);
+
+//			char updateLog[128];
+//			sprintf(updateLog, "[Radar] Update information obtained!! {%s, %s, %d, %s}", g_PeerList[index].name, g_PeerList[index].ip, g_PeerList[index].lastSeen, (g_PeerList[index].isOnline ? "Online" : "Offline"));
+//			AddLog(hwnd, updateLog);
+
+			char targetIP[32];
+			EnterCriticalSection(&g_PeerLock);
+			strcpy(targetIP, g_PeerList[index].ip);
+			LeaveCriticalSection(&g_PeerLock);
+
+			int lvIndex = -1;
+			int rowCount = ListView_GetItemCount(hList);
+			for (int i = 0; i < rowCount; i++) {
+				char currentIP[32];
+				ListView_GetItemText(hList, i, 2, currentIP, 32);
+				if (strcmp(currentIP, targetIP) == 0) {
+					lvIndex = i;
+					break;
+				}
+			}
+
+//			sprintf(updateLog, "[Radar] List index found!! The information is in line %d.", lvIndex);
+//			AddLog(hwnd, updateLog);
+
+			if (lvIndex != -1) {
+				if (isOnline == 0) {
+					ListView_SetItemText(hList, lvIndex, 3, "Offline");
+					char log[128];
+					sprintf(log, "[Friends] Aww, %s just left...", g_PeerList[index].name);
+					AddLog(hwnd, log);
+				} else {
+					ListView_SetItemText(hList, lvIndex, 3, "Active");
+				}
+			}
+
+			break;
+		}
+
+		case WM_UPDATE_CONFIG: {
+			UpdateGlobalSettings(g_Settings);
 			break;
 		}
 
@@ -1329,16 +2016,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT Message, WPARAM wParam, LPARAM lParam) 
 /* The 'main' function of Win32 GUI programs: this is where execution starts */
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 
+	InitializeCriticalSection(&g_PeerLock);
+
+	WSADATA wsaData;
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+		MessageBox(NULL, "WinSock init failed!", "Error", MB_OK);
+		return 0;
+	}
+
+//	DefaultNotification();
+
 	InitCommonControls();
 	HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 	if (FAILED(hr)) {
 		CoInitialize(NULL);
 	}
-
-	INITCOMMONCONTROLSEX icex;
-	icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
-	icex.dwICC = ICC_STANDARD_CLASSES;
-	InitCommonControlsEx(&icex);
 
 	WNDCLASSEX wc; /* A properties struct of our window */
 	HWND hwnd; /* A 'HANDLE', hence the H, or a pointer to our window */
@@ -1357,10 +2049,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	wc.hIcon		 = LoadIcon(GetModuleHandle(NULL), "MAINICON"); /* Load a standard icon */
 	wc.hIconSm		 = LoadIcon(GetModuleHandle(NULL), "MAINICON"); /* use the name "A" to use the project icon */
 
+
 	if (!RegisterClassEx(&wc)) {
 		MessageBox(NULL, "Window Registration Failed!", "Error!", MB_ICONEXCLAMATION | MB_OK);
 		return 0;
 	}
+
+	GetGlobalSettings(g_Settings);
 
 	hwnd = CreateWindowEx(WS_EX_CLIENTEDGE, "WindowClass", "File Transfer",
 	                      WS_VISIBLE | WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
@@ -1369,44 +2064,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	                      640, /* width */
 	                      480, /* height */
 	                      NULL, NULL, hInstance, NULL);
-	
-	// FirstRun
-		char firstRun[10] = {0};
-		GetPrivateProfileString("Status", "FirstRun", "Yes", firstRun, 10, ".\\config.ini");
-		
-		if (strcmp(firstRun, "Yes") == 0) {
-		    // Welcome
-		    const char* guideText = 
-			    "Hey! Welcome to Hero_Broom's File Transfer!!\n"
-			    "------------------------------------------\n"
-			    "1. [Quick Start]\n"
-			    "   - Sending: Select File -> Enter Target IP -> GO!!\n"
-			    "   - Receiving: Set Port -> Select Path -> Click Listen!!\n\n"
-			    "2. [The 'Secret' of IP]\n"
-			    "   - [IMPORTANT!!!] Make sure you and your friend are in the SAME LAN!!\n"
-			    "   - Use 'ipconfig' in CMD to find your IP if you're lost!!\n\n"
-			    "3. [Breakpoint Resume]\n"
-			    "   - Connection lost? NO PROBLEM!! Just start again,\n"
-			    "     it will resume from where it stopped!!\n\n"
-			    "4. [Pro Tip]\n"
-			    "   - If it's stuck, check your Firewall settings!!\n"
-			    "   - Don't leave the Port field empty or it will CRY!!\n\n"
-			    "Have fun transferring big files!! (Support me on GitHub!!)";
-		
-		    MessageBox(hwnd, guideText, "First Run Guide", MB_OK | MB_ICONINFORMATION);
-		
-		    WritePrivateProfileString("Status", "FirstRun", "No", ".\\config.ini");
-		}
 
 	if (hwnd == NULL) {
 		MessageBox(NULL, "Window Creation Failed!", "Error!", MB_ICONEXCLAMATION | MB_OK);
 		return 0;
 	}
 
-	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-		MessageBox(hwnd, "WinSock init failed!", "Error", MB_OK);
-		return 0;
-	}
+
+//	ShowNotification(hwnd, "Test Message", "Title", NIIF_INFO, 5000);
+
+	INITCOMMONCONTROLSEX icex;
+	icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
+	icex.dwICC = ICC_LISTVIEW_CLASSES;
+	InitCommonControlsEx(&icex);
 
 
 	/*
@@ -1421,6 +2091,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	WSACleanup();
 	CoUninitialize();
+	
+	DeleteCriticalSection(&g_PeerLock);
 
 	return msg.wParam;
 }

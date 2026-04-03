@@ -24,4 +24,4 @@ A high-performance file transfer utility built from scratch using C++ and the na
 * **Linker Flags**: Requires `-lws2_32` and `-lgdi32`.
 
 ### 📥 Download
-Check out the [Releases](https://github.com/HeroBroom56/Hero_Broom-s-File-Transfer/releases) page to download the standalone `.exe` binary.
+Check out the [Releases](https://github.com/YOUR_USERNAME/YOUR_REPO_NAME/releases) page to download the standalone `.exe` binary.

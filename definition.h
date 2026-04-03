@@ -1,0 +1,100 @@
+#ifndef DEFINITION_H
+#define DEFINITION_H
+
+#include <windows.h>
+
+struct SettingOptions {
+	char firstStart[10];
+	char nickname[32];
+	char localIP[32];
+	char savePath[MAX_PATH];
+	int port;
+	bool autoStart;
+	bool showNotification;
+};
+SettingOptions g_Settings;
+
+#define REG_APP_NAME "HeroBroomsFileTransfer"
+
+#define ID_EDIT_IP 101
+#define ID_PRESS_BUTTON 102
+#define ID_IP_FORMAT_ERROR 103
+#define ID_CHOOSE_FILE_BUTTON 104
+#define ID_CHOSEN_FILE 105
+#define ID_EDIT_PENDING_MAXIMUM 106
+#define ID_TOO_BIG 107
+#define ID_FORMAT_ERROR 108
+#define ID_INFO_NAME 109
+#define ID_INFO_SIZE 110
+#define ID_INFO_DATE 111
+#define ID_CONFIRM 112
+#define ID_IP_EMPTY 113
+#define ID_PENDING_EMPTY 114
+#define ID_LOG_DISPLAY 115
+#define ID_TAB_CTRL 116
+#define ID_PORT_HINT 117
+#define ID_PENDING_HINT 118
+#define ID_INFO_HINT 119
+#define ID_UI_BORDERS 120
+#define ID_IP_HINT 121
+#define ID_INPUT_TARGET_IP 122
+#define ID_INVALID_IP 123
+#define ID_COPY_LOG 124
+#define ID_CLEAR_LOG 125
+
+#define ID_EDIT_RECV_PORT 201
+#define ID_BUTTON_BROWSE_DIR 202
+#define ID_STATIC_SAVE_PATH 203
+#define ID_BUTTON_START_RECV 204
+#define ID_BUTTON_STOP_RECV 205
+#define ID_STATIC_PORT_HINT 206
+#define ID_EDIT_SAVE_PATH 207
+#define ID_BUTTON_OPEN_FOLDER 208
+#define ID_STATIC_INVALID_PORT 209
+#define ID_STATIC_EMPTY_PORT 210
+#define ID_STATIC_SENDER_HINT 211
+#define ID_STATIC_SENDER_NAME 212
+#define ID_STATIC_SENDER_IP 213
+
+#define ID_LISTBOX_LAN_RADAR 301
+
+#define ID_LIST_BOX_SETTINGS_OPTION 401
+#define ID_GROUPBOX_GENERAL 402
+#define ID_GRUOPBOX_NETWORK 403
+#define ID_GROUPBOX_ABOUT 404
+#define ID_TITLE_GENERAL 405
+#define ID_STATIC_NICK 406
+#define ID_EDIT_NICK 407
+#define ID_STATIC_DEFAULT_PATH 408
+#define ID_EDIT_DEFAULT_PATH 409
+#define ID_BUTTON_BROWSE 410
+#define ID_CHECK_AUTO_START 411
+#define ID_STATIC_AUTO_START 412
+#define ID_CHECK_NOTIFICATION 413
+#define ID_STATIC_NOTIFICATION 414
+#define ID_BUTTON_SAVE_GENERAL 415
+#define ID_TITLE_NETWORK 416
+#define ID_EDIT_READONLY_IP 417
+#define ID_BUTTON_COPY_IP 418
+
+#define ID_BUTTON_SAVE_NETWORK 430
+#define ID_TITLE_ABOUT 431
+
+#define ID_PROGRESS_BAR 901
+#define ID_STATIC_SPEED 902
+#define IDB_ABOUT_LOGO 903
+
+
+
+#define TAB_SEND 0
+#define TAB_RECEIVE 1
+#define TAB_RADAR 2
+#define TAB_SETTINGS 3
+
+
+
+#define WM_UPDATE_RADAR (WM_USER + 100)
+#define WM_UPDATE_RADAR_STATUS (WM_USER + 101)
+#define WM_UPDATE_CONFIG (WM_USER + 102)
+
+#endif

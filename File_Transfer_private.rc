@@ -1,6 +1,7 @@
 /* THIS FILE WILL BE OVERWRITTEN BY DEV-C++ */
 /* DO NOT EDIT! */
 
+#include "resource.rc"
 
 //
 // SUPPORT FOR WINDOWS XP THEMES:
@@ -8,4 +9,3 @@
 // LIBRARY VERSION 6.0 (IF IT IS AVAILABLE)
 //
 1 24 "File_Transfer.exe.Manifest"
-MAINICON ICON "app.ico"
